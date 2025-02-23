@@ -134,7 +134,7 @@ impl GameNode for PostFlopNode {
     #[inline]
     fn cfvalues_ip_compressed_mut(&mut self) -> &mut [i16] {
         unsafe {
-            slice::from_raw_parts_mut(self.storage3 as *mut f32, self.num_elements_ip as usize)
+            slice::from_raw_parts_mut(self.storage3 as *mut i16, self.num_elements_ip as usize)
         }
     }
 

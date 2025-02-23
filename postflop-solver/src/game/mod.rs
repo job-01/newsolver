@@ -1,23 +1,7 @@
-pub mod bet_size;
-pub mod base;
-pub mod atomic;
-pub mod alloc;
-pub mod bunching;
-pub mod card;
-pub mod hand;
-pub mod game; // Add this line
-pub mod mutex_like;
-pub mod hand_table;
-pub mod range;
-pub mod sliceop;
-pub mod solver;
-pub mod evaluation;
-pub mod interpreter;
-pub mod node;
-pub mod interface;
-
-#[cfg(test)]
-mod tests;
+mod base;
+mod evaluation;
+mod interpreter;
+mod node;
 
 #[cfg(feature = "bincode")]
 mod serialization;

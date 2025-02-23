@@ -1,587 +1,352 @@
 use crate::hand::*;
 use crate::range::*;
-use once_cell::sync::Lazy;
-use regex::Regex;
-use std::collections::BTreeSet;
-use std::fmt::Write;
-use std::str::FromStr;
+use std::mem;
 
 #[cfg(feature = "bincode")]
 use bincode::{Decode, Encode};
 
+/// A type representing a card, defined as an alias of `u8`.
+///
+/// The correspondence between the card and its ID is defined as follows:
+/// - `card_id = 4 * rank + suit` (where `0 <= card_id < 52`)
+///   - `rank`: 2 => `0`, 3 => `1`, 4 => `2`, ..., A => `12`
+///   - `suit`: club => `0`, diamond => `1`, heart => `2`, spade => `3`
 pub type Card = u8;
 
-pub const NOT_DEALT: Card = 255;
+/// Constant representing that the card is not yet dealt.
+pub const NOT_DEALT: Card = Card::MAX;
 
-/// A configuration of cards.
-///
-/// This struct specifies the initial ranges of players and the board cards.
-///
-/// See [`Range`] for the specification of range strings.
+/// A struct containing the card configuration.
 ///
 /// # Examples
 /// ```
 /// use postflop_solver::*;
 ///
-/// let config = CardConfig {
-///     range: ["AKs,QQ+".parse().unwrap(), "AA,KK,QQ".parse().unwrap()],
+/// let oop_range = "66+,A8s+,A5s-A4s,AJo+,K9s+,KQo,QTs+,JTs,96s+,85s+,75s+,65s,54s";
+/// let ip_range = "QQ-22,AQs-A2s,ATo+,K5s+,KJo+,Q8s+,J8s+,T7s+,96s+,86s+,75s+,64s+,53s+";
+///
+/// let card_config = CardConfig {
+///     range: [oop_range.parse().unwrap(), ip_range.parse().unwrap()],
 ///     flop: flop_from_str("Td9d6h").unwrap(),
-///     ..Default::default()
+///     turn: card_from_str("Qc").unwrap(),
+///     river: NOT_DEALT,
 /// };
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone)]
 #[cfg_attr(feature = "bincode", derive(Decode, Encode))]
 pub struct CardConfig {
+    /// Initial range of each player.
     pub range: [Range; 2],
+
+    /// Flop cards: each card must be unique.
     pub flop: [Card; 3],
+
+    /// Turn card: must be in range [`0`, `52`) or `NOT_DEALT`.
     pub turn: Card,
+
+    /// River card: must be in range [`0`, `52`) or `NOT_DEALT`.
     pub river: Card,
-    pub allowed_turn_cards: Vec<Card>,
-    pub allowed_river_cards: Vec<Card>,
-}
-
-/// A struct representing hand strength.
-///
-/// The `strength` field represents the strength of the hand (larger values means stronger hands).
-/// The `index` field represents the index of the private hand in the list returned by
-/// [`Range::get_hands_weights`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(feature = "bincode", derive(Decode, Encode))]
-pub struct StrengthItem {
-    pub strength: u16,
-    pub index: u16,
-}
-
-type SwapList = [Vec<(u16, u16)>; 2];
-
-impl Card {
-    /// Returns the minimum of two cards.
-    #[inline]
-    pub fn min(card1: Card, card2: Card) -> Card {
-        if card1 < card2 {
-            card1
-        } else {
-            card2
-        }
-    }
-
-    /// Returns the maximum of two cards.
-    #[inline]
-    pub fn max(card1: Card, card2: Card) -> Card {
-        if card1 > card2 {
-            card1
-        } else {
-            card2
-        }
-    }
 }
 
 impl Default for CardConfig {
     #[inline]
     fn default() -> Self {
         Self {
-            range: [Range::new(), Range::new()],
+            range: Default::default(),
             flop: [NOT_DEALT; 3],
             turn: NOT_DEALT,
             river: NOT_DEALT,
-            allowed_turn_cards: Vec::new(),
-            allowed_river_cards: Vec::new(),
         }
     }
 }
 
-/// Parses a comma-separated list of card strings into a vector of Cards.
+type PrivateCards = [Vec<(Card, Card)>; 2];
+
+type Indices = [Vec<u16>; 2];
+
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct StrengthItem {
+    pub(crate) strength: u16,
+    pub(crate) index: u16,
+}
+
+pub(crate) type SwapList = [Vec<(u16, u16)>; 2];
+
+type IsomorphismData = (
+    Vec<u8>,
+    Vec<Card>,
+    [SwapList; 4],
+    Vec<Vec<u8>>,
+    [Vec<Card>; 4],
+    [[SwapList; 4]; 4],
+);
+
+/// Returns an index of the given card pair.
 ///
-/// # Examples
-/// ```
-/// use postflop_solver::*;
-/// assert_eq!(parse_card_list("Qc,Kd,As"), Ok(vec![47, 45, 51]));
-/// assert_eq!(parse_card_list(""), Ok(vec![]));
-/// assert!(parse_card_list("Invalid").is_err());
-/// ```
+/// Examples: 2d2c => `0`, 2h2c => `1`, 2s2c => `2`, ..., AsAh => `1325`
 #[inline]
-pub fn parse_card_list(s: &str) -> Result<Vec<Card>, String> {
-    if s.trim().is_empty() {
-        return Ok(Vec::new());
+pub(crate) fn card_pair_to_index(mut card1: Card, mut card2: Card) -> usize {
+    if card1 > card2 {
+        mem::swap(&mut card1, &mut card2);
     }
-    s.split(',')
-        .map(|card_str| card_from_str(card_str.trim()))
-        .collect()
+    card1 as usize * (101 - card1 as usize) / 2 + card2 as usize - 1
+}
+
+/// Returns a card pair from the given index.
+///
+/// Examples: `0` => 2d2c, `1` => 2h2c , `2` => 2s2c, ..., `1325` => AsAh
+#[inline]
+pub(crate) fn index_to_card_pair(index: usize) -> (Card, Card) {
+    let card1 = (103 - (103.0 * 103.0 - 8.0 * index as f64).sqrt().ceil() as u16) / 2;
+    let card2 = index as u16 - card1 * (101 - card1) / 2 + 1;
+    (card1 as Card, card2 as Card)
 }
 
 impl CardConfig {
-    /// Creates a new [`CardConfig`] from strings.
-    ///
-    /// # Examples
-    /// ```
-    /// use postflop_solver::*;
-    ///
-    /// let config = CardConfig::with_str_config(
-    ///     "AKs,QQ+",
-    ///     "AA,KK,QQ",
-    ///     "Td9d6h",
-    ///     Some("Qc,Kd"),  // Allowed turn cards
-    ///     Some("As"),     // Allowed river cards
-    /// ).unwrap();
-    /// ```
-    pub fn with_str_config(
-        oop_range: &str,
-        ip_range: &str,
-        flop: &str,
-        turn_cards: Option<&str>,
-        river_cards: Option<&str>,
-    ) -> Result<Self, String> {
-        let mut config = Self {
-            range: [oop_range.parse()?, ip_range.parse()?],
-            flop: flop_from_str(flop)?,
-            turn: NOT_DEALT,
-            river: NOT_DEALT,
-            allowed_turn_cards: turn_cards
-                .map(parse_card_list)
-                .transpose()?
-                .unwrap_or_default(),
-            allowed_river_cards: river_cards
-                .map(parse_card_list)
-                .transpose()?
-                .unwrap_or_default(),
-        };
-        config.check_validity()?;
-        Ok(config)
-    }
-
-    fn check_validity(&self) -> Result<(), String> {
-        let mut board_cards = BTreeSet::new();
-        for &card in &self.flop {
-            if card == NOT_DEALT {
-                return Err("Flop cards not initialized".to_string());
-            }
-            if card >= 52 {
-                return Err(format!("Invalid flop card: {}", card));
-            }
-            if !board_cards.insert(card) {
-                return Err("Duplicate flop card".to_string());
-            }
-        }
-        if self.turn != NOT_DEALT {
-            if self.turn >= 52 {
-                return Err(format!("Invalid turn card: {}", self.turn));
-            }
-            if !board_cards.insert(self.turn) {
-                return Err("Turn card overlaps with flop".to_string());
-            }
-        }
-        if self.river != NOT_DEALT {
-            if self.river >= 52 {
-                return Err(format!("Invalid river card: {}", self.river));
-            }
-            if !board_cards.insert(self.river) {
-                return Err("River card overlaps with flop or turn".to_string());
-            }
-            if self.turn == NOT_DEALT {
-                return Err("River specified without turn".to_string());
-            }
-        }
-        for &card in &self.allowed_turn_cards {
-            if card >= 52 {
-                return Err(format!("Invalid turn card: {}", card));
-            }
-            if board_cards.contains(&card) {
-                return Err(format!(
-                    "Allowed turn card {} overlaps with board",
-                    card_to_string(card)?
-                ));
-            }
-            board_cards.insert(card);
-        }
-        for &card in &self.allowed_river_cards {
-            if card >= 52 {
-                return Err(format!("Invalid river card: {}", card));
-            }
-            if board_cards.contains(&card) {
-                return Err(format!(
-                    "Allowed river card {} overlaps with board or turn cards",
-                    card_to_string(card)?
-                ));
-            }
-            board_cards.insert(card);
-        }
-        Ok(())
-    }
-
-    /// Computes valid hand indices for flop, turn, and river states.
-    pub(super) fn valid_indices(
+    pub(crate) fn valid_indices(
         &self,
-        private_cards: &[(Card, Card); 2],
-    ) -> ([Vec<u16>; 2], Vec<[Vec<u16>; 2]>, Vec<[Vec<u16>; 2]>) {
-        let mut flop_mask: u64 = (1 << self.flop[0]) | (1 << self.flop[1]) | (1 << self.flop[2]);
-        let turn_exists = self.turn != NOT_DEALT;
-        let river_exists = self.river != NOT_DEALT;
+        private_cards: &PrivateCards,
+    ) -> (Indices, Vec<Indices>, Vec<Indices>) {
+        let ret_flop = if self.turn == NOT_DEALT {
+            [
+                (0..private_cards[0].len() as u16).collect(),
+                (0..private_cards[1].len() as u16).collect(),
+            ]
+        } else {
+            Indices::default()
+        };
 
-        if turn_exists {
-            flop_mask |= 1 << self.turn;
-        }
-        if river_exists {
-            flop_mask |= 1 << self.river;
+        let mut ret_turn = vec![Indices::default(); 52];
+        for board in 0..52 {
+            if !self.flop.contains(&board)
+                && (self.turn == NOT_DEALT || self.turn == board)
+                && self.river == NOT_DEALT
+            {
+                ret_turn[board as usize] =
+                    Self::valid_indices_internal(private_cards, board, NOT_DEALT);
+            }
         }
 
-        let mut valid_indices_flop = [Vec::new(), Vec::new()];
-        let mut valid_indices_turn = Vec::new();
-        let mut valid_indices_river = Vec::new();
+        let mut ret_river = vec![Indices::default(); 52 * 51 / 2];
+        for board1 in 0..52 {
+            for board2 in board1 + 1..52 {
+                if !self.flop.contains(&board1)
+                    && !self.flop.contains(&board2)
+                    && (self.turn == NOT_DEALT || board1 == self.turn || board2 == self.turn)
+                    && (self.river == NOT_DEALT || board1 == self.river || board2 == self.river)
+                {
+                    let index = card_pair_to_index(board1, board2);
+                    ret_river[index] = Self::valid_indices_internal(private_cards, board1, board2);
+                }
+            }
+        }
+
+        (ret_flop, ret_turn, ret_river)
+    }
+
+    fn valid_indices_internal(
+        private_cards: &[Vec<(Card, Card)>; 2],
+        board1: Card,
+        board2: Card,
+    ) -> [Vec<u16>; 2] {
+        let mut ret = [
+            Vec::with_capacity(private_cards[0].len()),
+            Vec::with_capacity(private_cards[1].len()),
+        ];
+
+        let mut board_mask: u64 = 0;
+        if board1 != NOT_DEALT {
+            board_mask |= 1 << board1;
+        }
+        if board2 != NOT_DEALT {
+            board_mask |= 1 << board2;
+        }
 
         for player in 0..2 {
-            let hands = &private_cards[player];
-            let mut indices = Vec::with_capacity(hands.len());
+            ret[player].extend(private_cards[player].iter().enumerate().filter_map(
+                |(index, &(c1, c2))| {
+                    let hand_mask: u64 = (1 << c1) | (1 << c2);
+                    if hand_mask & board_mask == 0 {
+                        Some(index as u16)
+                    } else {
+                        None
+                    }
+                },
+            ));
 
-            for (i, &(c1, c2)) in hands.iter().enumerate() {
-                let mask: u64 = (1 << c1) | (1 << c2);
-                if mask & flop_mask == 0 {
-                    indices.push(i as u16);
-                }
-            }
-
-            valid_indices_flop[player] = indices;
+            ret[player].shrink_to_fit();
         }
 
-        if !turn_exists {
-            let allowed_turns = if self.allowed_turn_cards.is_empty() {
-                let mut all_cards = Vec::with_capacity(52 - self.flop.len());
-                for card in 0..52 {
-                    if (1 << card) & flop_mask == 0 {
-                        all_cards.push(card);
-                    }
-                }
-                all_cards
-            } else {
-                self.allowed_turn_cards.clone()
-            };
-
-            for &turn in &allowed_turns {
-                let mut indices = [Vec::new(), Vec::new()];
-                let turn_mask = flop_mask | (1 << turn);
-
-                for player in 0..2 {
-                    let hands = &private_cards[player];
-                    let mut player_indices = Vec::with_capacity(hands.len());
-
-                    for (i, &(c1, c2)) in hands.iter().enumerate() {
-                        let mask: u64 = (1 << c1) | (1 << c2);
-                        if mask & turn_mask == 0 {
-                            player_indices.push(i as u16);
-                        }
-                    }
-
-                    indices[player] = player_indices;
-                }
-
-                valid_indices_turn.push(indices);
-            }
-        }
-
-        if turn_exists && !river_exists {
-            let allowed_rivers = if self.allowed_river_cards.is_empty() {
-                let mut all_cards = Vec::with_capacity(52 - 4);
-                for card in 0..52 {
-                    if (1 << card) & flop_mask == 0 {
-                        all_cards.push(card);
-                    }
-                }
-                all_cards
-            } else {
-                self.allowed_river_cards.clone()
-            };
-
-            for &river in &allowed_rivers {
-                let mut indices = [Vec::new(), Vec::new()];
-                let river_mask = flop_mask | (1 << river);
-
-                for player in 0..2 {
-                    let hands = &private_cards[player];
-                    let mut player_indices = Vec::with_capacity(hands.len());
-
-                    for (i, &(c1, c2)) in hands.iter().enumerate() {
-                        let mask: u64 = (1 << c1) | (1 << c2);
-                        if mask & river_mask == 0 {
-                            player_indices.push(i as u16);
-                        }
-                    }
-
-                    indices[player] = player_indices;
-                }
-
-                valid_indices_river.push(indices);
-            }
-        }
-
-        if river_exists {
-            let mut indices = [Vec::new(), Vec::new()];
-            for player in 0..2 {
-                let hands = &private_cards[player];
-                let mut player_indices = Vec::with_capacity(hands.len());
-
-                for (i, &(c1, c2)) in hands.iter().enumerate() {
-                    let mask: u64 = (1 << c1) | (1 << c2);
-                    if mask & flop_mask == 0 {
-                        player_indices.push(i as u16);
-                    }
-                }
-
-                indices[player] = player_indices;
-            }
-            valid_indices_river.push(indices);
-        }
-
-        (valid_indices_flop, valid_indices_turn, valid_indices_river)
+        ret
     }
 
-    /// Computes hand strength for all possible turn/river combinations.
-    pub(super) fn hand_strength(
+    pub(crate) fn hand_strength(
         &self,
-        private_cards: &[(Card, Card); 2],
+        private_cards: &PrivateCards,
     ) -> Vec<[Vec<StrengthItem>; 2]> {
-        let turn_exists = self.turn != NOT_DEALT;
-        let river_exists = self.river != NOT_DEALT;
-        let mut hand_strength = Vec::new();
+        let mut ret = vec![Default::default(); 52 * 51 / 2];
 
-        let allowed_turns = if self.allowed_turn_cards.is_empty() {
-            (0..52)
-                .filter(|&c| !self.flop.contains(&c))
-                .collect::<Vec<_>>()
-        } else {
-            self.allowed_turn_cards.clone()
-        };
-        let allowed_rivers = if self.allowed_river_cards.is_empty() {
-            (0..52)
-                .filter(|&c| {
-                    !self.flop.contains(&c) && (self.turn == NOT_DEALT || c != self.turn)
-                })
-                .collect::<Vec<_>>()
-        } else {
-            self.allowed_river_cards.clone()
-        };
+        let mut board = Hand::new();
+        for &card in &self.flop {
+            board = board.add_card(card as usize);
+        }
 
-        if !turn_exists {
-            for &turn in &allowed_turns {
-                for &river in &allowed_rivers {
-                    if turn != river {
-                        let strength = self.compute_hand_strength(turn, river, private_cards);
-                        hand_strength.push(strength);
+        for board1 in 0..52 {
+            for board2 in board1 + 1..52 {
+                if !board.contains(board1 as usize)
+                    && !board.contains(board2 as usize)
+                    && (self.turn == NOT_DEALT || board1 == self.turn || board2 == self.turn)
+                    && (self.river == NOT_DEALT || board1 == self.river || board2 == self.river)
+                {
+                    let board = board.add_card(board1 as usize).add_card(board2 as usize);
+                    let mut strength = [
+                        Vec::with_capacity(private_cards[0].len() + 2),
+                        Vec::with_capacity(private_cards[1].len() + 2),
+                    ];
+
+                    for player in 0..2 {
+                        // add the weakest and strongest sentinels
+                        strength[player].push(StrengthItem {
+                            strength: 0,
+                            index: 0,
+                        });
+                        strength[player].push(StrengthItem {
+                            strength: u16::MAX,
+                            index: u16::MAX,
+                        });
+
+                        strength[player].extend(
+                            private_cards[player].iter().enumerate().filter_map(
+                                |(index, &(c1, c2))| {
+                                    let (c1, c2) = (c1 as usize, c2 as usize);
+                                    if board.contains(c1) || board.contains(c2) {
+                                        None
+                                    } else {
+                                        let hand = board.add_card(c1).add_card(c2);
+                                        Some(StrengthItem {
+                                            strength: hand.evaluate() + 1, // +1 to avoid 0
+                                            index: index as u16,
+                                        })
+                                    }
+                                },
+                            ),
+                        );
+
+                        strength[player].shrink_to_fit();
+                        strength[player].sort_unstable();
                     }
+
+                    ret[card_pair_to_index(board1, board2)] = strength;
                 }
             }
-        } else if !river_exists {
-            for &river in &allowed_rivers {
-                if river != self.turn {
-                    let strength = self.compute_hand_strength(self.turn, river, private_cards);
-                    hand_strength.push(strength);
-                }
-            }
-        } else {
-            let strength = self.compute_hand_strength(self.turn, self.river, private_cards);
-            hand_strength.push(strength);
         }
 
-        hand_strength
+        ret
     }
 
-    fn compute_hand_strength(
-        &self,
-        turn: Card,
-        river: Card,
-        private_cards: &[(Card, Card); 2],
-    ) -> [Vec<StrengthItem>; 2] {
-        let board = [self.flop[0], self.flop[1], self.flop[2], turn, river];
-        let mut strength = [Vec::new(), Vec::new()];
-
-        for player in 0..2 {
-            let hands = &private_cards[player];
-            let mut player_strength = Vec::with_capacity(hands.len() + 2);
-            player_strength.push(StrengthItem {
-                strength: 0,
-                index: u16::MAX,
-            });
-
-            for (i, &(c1, c2)) in hands.iter().enumerate() {
-                let hand_mask: u64 = (1 << c1) | (1 << c2);
-                let board_mask: u64 = board.iter().map(|&c| 1 << c).sum();
-                if hand_mask & board_mask == 0 {
-                    let strength_val = hand_strength(&[c1, c2], &board);
-                    player_strength.push(StrengthItem {
-                        strength: strength_val,
-                        index: i as u16,
-                    });
+    pub(crate) fn isomorphism(&self, private_cards: &[Vec<(Card, Card)>; 2]) -> IsomorphismData {
+        let mut suit_isomorphism = [0; 4];
+        let mut next_index = 1;
+        'outer: for suit2 in 1..4 {
+            for suit1 in 0..suit2 {
+                if self.range[0].is_suit_isomorphic(suit1, suit2)
+                    && self.range[1].is_suit_isomorphic(suit1, suit2)
+                {
+                    suit_isomorphism[suit2 as usize] = suit_isomorphism[suit1 as usize];
+                    continue 'outer;
                 }
             }
-
-            player_strength.push(StrengthItem {
-                strength: u16::MAX,
-                index: u16::MAX,
-            });
-            player_strength.sort_unstable_by_key(|item| item.strength);
-            strength[player] = player_strength;
+            suit_isomorphism[suit2 as usize] = next_index;
+            next_index += 1;
         }
 
-        strength
-    }
+        let flop_mask: u64 = (1 << self.flop[0]) | (1 << self.flop[1]) | (1 << self.flop[2]);
+        let mut flop_rankset = [0; 4];
 
-    /// Computes isomorphic chance nodes for turn and river.
-    pub(super) fn isomorphism(
-        &self,
-        private_cards: &[(Card, Card); 2],
-    ) -> (
-        Vec<u8>,
-        Vec<Card>,
-        [SwapList; 4],
-        Vec<Vec<u8>>,
-        [Vec<Card>; 4],
-        [[SwapList; 4]; 4],
-    ) {
-        let turn_exists = self.turn != NOT_DEALT;
-        let river_exists = self.river != NOT_DEALT;
+        for &card in &self.flop {
+            let rank = card >> 2;
+            let suit = card & 3;
+            flop_rankset[suit as usize] |= 1 << rank;
+        }
+
+        let mut isomorphic_suit = [None; 4];
+        let mut reverse_table = vec![usize::MAX; 52 * 51 / 2];
 
         let mut isomorphism_ref_turn = Vec::new();
         let mut isomorphism_card_turn = Vec::new();
-        let mut isomorphism_swap_turn = [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
-        let mut isomorphism_ref_river = Vec::new();
-        let mut isomorphism_card_river = [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
-        let mut isomorphism_swap_river = [
-            [Vec::new(), Vec::new(), Vec::new(), Vec::new()],
-            [Vec::new(), Vec::new(), Vec::new(), Vec::new()],
-            [Vec::new(), Vec::new(), Vec::new(), Vec::new()],
-            [Vec::new(), Vec::new(), Vec::new(), Vec::new()],
-        ];
+        let mut isomorphism_swap_turn = Default::default();
 
-        let flop = &self.flop;
-        let flop_suit_mask: u64 = (1 << (flop[0] & 3)) | (1 << (flop[1] & 3)) | (1 << (flop[2] & 3));
-        let num_flop_suits = flop_suit_mask.count_ones();
-
-        let allowed_turns = if self.allowed_turn_cards.is_empty() {
-            (0..52)
-                .filter(|&c| !flop.contains(&c))
-                .collect::<Vec<_>>()
-        } else {
-            self.allowed_turn_cards.clone()
-        };
-        let allowed_rivers = if self.allowed_river_cards.is_empty() {
-            (0..52)
-                .filter(|&c| {
-                    !flop.contains(&c) && (self.turn == NOT_DEALT || c != self.turn)
-                })
-                .collect::<Vec<_>>()
-        } else {
-            self.allowed_river_cards.clone()
-        };
-
-        if !turn_exists && num_flop_suits <= 2 {
-            let mut ref_cards = Vec::new();
-            let mut suit_map = [0; 4];
-
-            for &turn in &allowed_turns {
-                let suit = turn & 3;
-                let num_suits = (flop_suit_mask | (1 << suit)).count_ones();
-                if num_suits <= 2 {
-                    let pos = ref_cards.iter().position(|&c| {
-                        let ref_suit = c & 3;
-                        self.range[0].is_suit_isomorphic(suit, ref_suit)
-                            && self.range[1].is_suit_isomorphic(suit, ref_suit)
-                    });
-
-                    if let Some(pos) = pos {
-                        isomorphism_ref_turn.push(pos as u8);
-                        isomorphism_card_turn.push(turn);
-                        suit_map[suit as usize] = ref_cards[pos] & 3;
-
-                        for player in 0..2 {
-                            let hands = &private_cards[player];
-                            let mut swap_list = Vec::new();
-                            for (i, &(c1, c2)) in hands.iter().enumerate() {
-                                let c1_new = (c1 & !3) | suit_map[c1 & 3 as Card];
-                                let c2_new = (c2 & !3) | suit_map[c2 & 3 as Card];
-                                if c1 != c1_new || c2 != c2_new {
-                                    let pos = hands
-                                        .iter()
-                                        .position(|&c| c == (c1_new, c2_new))
-                                        .unwrap();
-                                    swap_list.push((i as u16, pos as u16));
-                                }
-                            }
-                            isomorphism_swap_turn[suit as usize][player] = swap_list;
-                        }
-                    } else {
-                        ref_cards.push(turn);
-                        isomorphism_ref_turn.push((ref_cards.len() - 1) as u8);
-                        suit_map[suit as usize] = suit;
+        // turn isomorphism
+        if self.turn == NOT_DEALT {
+            for suit1 in 1..4 {
+                for suit2 in 0..suit1 {
+                    if flop_rankset[suit1 as usize] == flop_rankset[suit2 as usize]
+                        && suit_isomorphism[suit1 as usize] == suit_isomorphism[suit2 as usize]
+                    {
+                        isomorphic_suit[suit1 as usize] = Some(suit2);
+                        Self::isomorphism_swap_internal(
+                            &mut isomorphism_swap_turn,
+                            &mut reverse_table,
+                            suit1,
+                            suit2,
+                            private_cards,
+                        );
+                        break;
                     }
-                } else {
-                    isomorphism_ref_turn.push(isomorphism_ref_turn.len() as u8);
                 }
             }
+
+            Self::isomorphism_internal(
+                &mut isomorphism_ref_turn,
+                &mut isomorphism_card_turn,
+                flop_mask,
+                &isomorphic_suit,
+            );
         }
 
-        if turn_exists && !river_exists {
-            let turn_suit = self.turn & 3;
-            let num_suits = (flop_suit_mask | (1 << turn_suit)).count_ones();
+        let mut isomorphism_ref_river = vec![Vec::new(); 52];
+        let mut isomorphism_card_river: [Vec<Card>; 4] = Default::default();
+        let mut isomorphism_swap_river: [[SwapList; 4]; 4] = Default::default();
 
-            if num_suits <= 2 {
-                let mut ref_cards = Vec::new();
-                let mut suit_map = [0; 4];
+        // river isomorphism
+        if self.river == NOT_DEALT {
+            for turn in 0..52 {
+                if (1 << turn) & flop_mask != 0 || (self.turn != NOT_DEALT && self.turn != turn) {
+                    continue;
+                }
 
-                for &river in &allowed_rivers {
-                    let suit = river & 3;
-                    let num_suits =
-                        (flop_suit_mask | (1 << turn_suit) | (1 << suit)).count_ones();
-                    if num_suits <= 2 {
-                        let pos = ref_cards.iter().position(|&c| {
-                            let ref_suit = c & 3;
-                            self.range[0].is_suit_isomorphic(suit, ref_suit)
-                                && self.range[1].is_suit_isomorphic(suit, ref_suit)
-                        });
+                let turn_mask = flop_mask | (1 << turn);
+                let mut turn_rankset = flop_rankset;
+                turn_rankset[turn as usize & 3] |= 1 << (turn >> 2);
 
-                        if let Some(pos) = pos {
-                            isomorphism_card_river[turn_suit as usize].push(river);
-                            if isomorphism_ref_river.is_empty() {
-                                isomorphism_ref_river.push(Vec::new());
-                            }
-                            isomorphism_ref_river
-                                .last_mut()
-                                .unwrap()
-                                .push(pos as u8);
+                isomorphic_suit.fill(None);
 
-                            suit_map[suit as usize] = ref_cards[pos] & 3;
-
-                            for player in 0..2 {
-                                let hands = &private_cards[player];
-                                let mut swap_list = Vec::new();
-                                for (i, &(c1, c2)) in hands.iter().enumerate() {
-                                    let c1_new = (c1 & !3) | suit_map[c1 & 3 as Card];
-                                    let c2_new = (c2 & !3) | suit_map[c2 & 3 as Card];
-                                    if c1 != c1_new || c2 != c2_new {
-                                        let pos = hands
-                                            .iter()
-                                            .position(|&c| c == (c1_new, c2_new))
-                                            .unwrap();
-                                        swap_list.push((i as u16, pos as u16));
-                                    }
-                                }
-                                isomorphism_swap_river[turn_suit as usize][suit as usize][player] =
-                                    swap_list;
-                            }
-                        } else {
-                            ref_cards.push(river);
-                            if isomorphism_ref_river.is_empty() {
-                                isomorphism_ref_river.push(Vec::new());
-                            }
-                            isomorphism_ref_river
-                                .last_mut()
-                                .unwrap()
-                                .push((ref_cards.len() - 1) as u8);
-                            suit_map[suit as usize] = suit;
+                for suit1 in 1..4 {
+                    for suit2 in 0..suit1 {
+                        if (flop_rankset[suit1 as usize] == flop_rankset[suit2 as usize]
+                            || self.turn != NOT_DEALT)
+                            && turn_rankset[suit1 as usize] == turn_rankset[suit2 as usize]
+                            && suit_isomorphism[suit1 as usize] == suit_isomorphism[suit2 as usize]
+                        {
+                            isomorphic_suit[suit1 as usize] = Some(suit2);
+                            Self::isomorphism_swap_internal(
+                                &mut isomorphism_swap_river[turn as usize & 3],
+                                &mut reverse_table,
+                                suit1,
+                                suit2,
+                                private_cards,
+                            );
+                            break;
                         }
-                    } else if isomorphism_ref_river.is_empty() {
-                        isomorphism_ref_river.push(Vec::new());
                     }
                 }
-            } else if isomorphism_ref_river.is_empty() {
-                isomorphism_ref_river.push(Vec::new());
+
+                Self::isomorphism_internal(
+                    &mut isomorphism_ref_river[turn as usize],
+                    &mut isomorphism_card_river[turn as usize & 3],
+                    turn_mask,
+                    &isomorphic_suit,
+                );
             }
         }
 
@@ -594,244 +359,93 @@ impl CardConfig {
             isomorphism_swap_river,
         )
     }
-}
 
-/// Computes the index of card pair in the `Range::data` field.
-///
-/// Undefined behavior if:
-///   - `card1` or `card2` is not less than `52`
-///   - `card1` is equal to `card2`
-#[inline]
-pub fn card_pair_to_index(card1: Card, card2: Card) -> usize {
-    let min_card = Card::min(card1, card2);
-    let max_card = Card::max(card1, card2);
-    (max_card * (max_card - 1)) as usize / 2 + min_card as usize
-}
+    fn isomorphism_swap_internal(
+        swap_list: &mut [SwapList; 4],
+        reverse_table: &mut [usize],
+        suit1: u8,
+        suit2: u8,
+        private_cards: &PrivateCards,
+    ) {
+        let swap_list = &mut swap_list[suit1 as usize];
+        let replacer = |card: Card| {
+            if card & 3 == suit1 {
+                card - suit1 + suit2
+            } else if card & 3 == suit2 {
+                card + suit1 - suit2
+            } else {
+                card
+            }
+        };
 
-/// Attempts to convert a rank character to a rank index.
-///
-/// `'A'` => `12`, `'K'` => `11`, ..., `'2'` => `0`.
-#[inline]
-fn char_to_rank(c: char) -> Result<u8, String> {
-    match c {
-        'A' | 'a' => Ok(12),
-        'K' | 'k' => Ok(11),
-        'Q' | 'q' => Ok(10),
-        'J' | 'j' => Ok(9),
-        'T' | 't' => Ok(8),
-        '2'..='9' => Ok(c as u8 - b'2'),
-        _ => Err(format!("Expected rank character: {c}")),
+        for player in 0..2 {
+            if !swap_list[player].is_empty() {
+                continue;
+            }
+
+            reverse_table.fill(usize::MAX);
+            let cards = &private_cards[player];
+
+            for i in 0..cards.len() {
+                reverse_table[card_pair_to_index(cards[i].0, cards[i].1)] = i;
+            }
+
+            for (i, &(c1, c2)) in cards.iter().enumerate() {
+                let c1 = replacer(c1);
+                let c2 = replacer(c2);
+                let index = reverse_table[card_pair_to_index(c1, c2)];
+                if i < index {
+                    swap_list[player].push((i as u16, index as u16));
+                }
+            }
+        }
+    }
+
+    fn isomorphism_internal(
+        isomorphism_ref: &mut Vec<u8>,
+        isomorphism_card: &mut Vec<Card>,
+        mask: u64,
+        isomorphic_suit: &[Option<u8>; 4],
+    ) {
+        let push_card = isomorphism_card.is_empty();
+        let mut counter = 0;
+        let mut indices = [0; 52];
+
+        for card in 0..52 {
+            if (1 << card) & mask != 0 {
+                continue;
+            }
+
+            let suit = card & 3;
+
+            if let Some(replace_suit) = isomorphic_suit[suit as usize] {
+                let replace_card = card - suit + replace_suit;
+                isomorphism_ref.push(indices[replace_card as usize]);
+                if push_card {
+                    isomorphism_card.push(card);
+                }
+            } else {
+                indices[card as usize] = counter;
+                counter += 1;
+            }
+        }
     }
 }
 
-/// Attempts to convert a suit character to a suit index.
-///
-/// `'c'` => `0`, `'d'` => `1`, `'h'` => `2`, `'s'` => `3`.
-#[inline]
-fn char_to_suit(c: char) -> Result<u8, String> {
-    match c {
-        'c' => Ok(0),
-        'd' => Ok(1),
-        'h' => Ok(2),
-        's' => Ok(3),
-        _ => Err(format!("Expected suit character: {c}")),
-    }
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-/// Attempts to convert a rank index to a rank character.
-///
-/// `12` => `'A'`, `11` => `'K'`, ..., `0` => `'2'`.
-#[inline]
-fn rank_to_char(rank: u8) -> Result<char, String> {
-    match rank {
-        12 => Ok('A'),
-        11 => Ok('K'),
-        10 => Ok('Q'),
-        9 => Ok('J'),
-        8 => Ok('T'),
-        0..=7 => Ok((rank + b'2') as char),
-        _ => Err(format!("Invalid input: {rank}")),
-    }
-}
-
-/// Attempts to convert a suit index to a suit character.
-///
-/// `0` => `'c'`, `1` => `'d'`, `2` => `'h'`, `3` => `'s'`.
-#[inline]
-fn suit_to_char(suit: u8) -> Result<char, String> {
-    match suit {
-        0 => Ok('c'),
-        1 => Ok('d'),
-        2 => Ok('h'),
-        3 => Ok('s'),
-        _ => Err(format!("Invalid input: {suit}")),
-    }
-}
-
-/// Attempts to convert a card into a string.
-///
-/// # Examples
-/// ```
-/// use postflop_solver::card_to_string;
-///
-/// assert_eq!(card_to_string(0), Ok("2c".to_string()));
-/// assert_eq!(card_to_string(5), Ok("3d".to_string()));
-/// assert_eq!(card_to_string(10), Ok("4h".to_string()));
-/// assert_eq!(card_to_string(51), Ok("As".to_string()));
-/// assert!(card_to_string(52).is_err());
-/// ```
-#[inline]
-pub fn card_to_string(card: Card) -> Result<String, String> {
-    check_card(card)?;
-    let rank = card >> 2;
-    let suit = card & 3;
-    Ok(format!("{}{}", rank_to_char(rank)?, suit_to_char(suit)?))
-}
-
-/// Attempts to convert hole cards into a string.
-///
-/// See [`Card`] for encoding of cards.
-/// The card order in the input does not matter, but the output string is sorted in descending order
-/// of card IDs.
-///
-/// # Examples
-/// ```
-/// use postflop_solver::hole_to_string;
-///
-/// assert_eq!(hole_to_string((0, 5)), Ok("3d2c".to_string()));
-/// assert_eq!(hole_to_string((10, 51)), Ok("As4h".to_string()));
-/// assert!(hole_to_string((52, 53)).is_err());
-/// ```
-#[inline]
-pub fn hole_to_string(hole: (Card, Card)) -> Result<String, String> {
-    let max_card = Card::max(hole.0, hole.1);
-    let min_card = Card::min(hole.0, hole.1);
-    Ok(format!(
-        "{}{}",
-        card_to_string(max_card)?,
-        card_to_string(min_card)?
-    ))
-}
-
-/// Attempts to convert a list of hole cards into a list of strings.
-///
-/// See [`Card`] for encoding of cards.
-/// The card order of each pair in the input does not matter, but the output string of each pair is
-/// sorted in descending order of card IDs.
-///
-/// # Examples
-/// ```
-/// use postflop_solver::holes_to_strings;
-///
-/// assert_eq!(
-///     holes_to_strings(&[(0, 5), (10, 51)]),
-///     Ok(vec!["3d2c".to_string(), "As4h".to_string()])
-/// );
-/// assert!(holes_to_strings(&[(52, 53)]).is_err());
-/// ```
-#[inline]
-pub fn holes_to_strings(holes: &[(Card, Card)]) -> Result<Vec<String>, String> {
-    holes.iter().map(|&hole| hole_to_string(hole)).collect()
-}
-
-/// Attempts to read the next card from a char iterator.
-///
-/// # Examples
-/// ```
-/// use postflop_solver::card_from_chars;
-///
-/// let mut chars = "2c3d4hAs".chars();
-/// assert_eq!(card_from_chars(&mut chars), Ok(0));
-/// assert_eq!(card_from_chars(&mut chars), Ok(5));
-/// assert_eq!(card_from_chars(&mut chars), Ok(10));
-/// assert_eq!(card_from_chars(&mut chars), Ok(51));
-/// assert!(card_from_chars(&mut chars).is_err());
-/// ```
-#[inline]
-pub fn card_from_chars<T: Iterator<Item = char>>(chars: &mut T) -> Result<Card, String> {
-    let rank_char = chars.next().ok_or_else(|| "Unexpected end".to_string())?;
-    let suit_char = chars.next().ok_or_else(|| "Unexpected end".to_string())?;
-
-    let rank = char_to_rank(rank_char)?;
-    let suit = char_to_suit(suit_char)?;
-
-    Ok((rank << 2) | suit)
-}
-
-/// Attempts to convert a string into a card.
-///
-/// # Examples
-/// ```
-/// use postflop_solver::card_from_str;
-///
-/// assert_eq!(card_from_str("2c"), Ok(0));
-/// assert_eq!(card_from_str("3d"), Ok(5));
-/// assert_eq!(card_from_str("4h"), Ok(10));
-/// assert_eq!(card_from_str("As"), Ok(51));
-/// ```
-#[inline]
-pub fn card_from_str(s: &str) -> Result<Card, String> {
-    let mut chars = s.chars();
-    let result = card_from_chars(&mut chars)?;
-
-    if chars.next().is_some() {
-        return Err("Expected exactly two characters".to_string());
-    }
-
-    Ok(result)
-}
-
-/// Attempts to convert an optionally space-separated string into a sorted flop array.
-///
-/// # Examples
-/// ```
-/// use postflop_solver::flop_from_str;
-///
-/// assert_eq!(flop_from_str("2c3d4h"), Ok([0, 5, 10]));
-/// assert_eq!(flop_from_str("As Ah Ks"), Ok([47, 50, 51]));
-/// assert!(flop_from_str("2c3d4h5s").is_err());
-/// ```
-#[inline]
-pub fn flop_from_str(s: &str) -> Result<[Card; 3], String> {
-    let mut result = [0; 3];
-    let mut chars = s.chars();
-
-    result[0] = card_from_chars(&mut chars)?;
-    result[1] = card_from_chars(&mut chars.by_ref().skip_while(|c| c.is_whitespace()))?;
-    result[2] = card_from_chars(&mut chars.by_ref().skip_while(|c| c.is_whitespace()))?;
-
-    if chars.next().is_some() {
-        return Err("Expected exactly three cards".to_string());
-    }
-
-    result.sort_unstable();
-
-    if result[0] == result[1] || result[1] == result[2] {
-        return Err("Cards must be unique".to_string());
-    }
-
-    Ok(result)
-}
-
-/// Computes the index of card pair in the `Range::data` field.
-///
-/// See [`Card`] for encoding of cards.
-///
-/// Undefined behavior if:
-///   - `card1` or `card2` is not less than `52`
-///   - `card1` is equal to `card2`
-#[inline]
-pub fn index_to_card_pair(index: usize) -> (Card, Card) {
-    let max_card = (((1 + 8 * index as u64) as f64).sqrt() as u64 + 1) / 2;
-    let min_card = index as u64 - max_card * (max_card - 1) / 2;
-    (min_card as Card, max_card as Card)
-}
-
-#[inline]
-fn check_card(card: Card) -> Result<(), String> {
-    if card < 52 {
-        Ok(())
-    } else {
-        Err(format!("Invalid card: {card}"))
+    #[test]
+    fn test_card_pair_index() {
+        let mut k = 0;
+        for i in 0..52 {
+            for j in (i + 1)..52 {
+                assert_eq!(card_pair_to_index(i, j), k);
+                assert_eq!(card_pair_to_index(j, i), k);
+                assert_eq!(index_to_card_pair(k), (i, j));
+                k += 1;
+            }
+        }
     }
 }
