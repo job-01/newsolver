@@ -33,6 +33,13 @@
     </button>
 
     <button
+      :class="itemStyle('select-runouts')"
+      @click="store.sideView = 'select-runouts'"
+    >
+      Select Runouts
+    </button>
+
+    <button
       :class="itemStyle('tree-config')"
       @click="store.sideView = 'tree-config'"
     >

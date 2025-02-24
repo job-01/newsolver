@@ -5,9 +5,9 @@
   "type": "module",
   "license": "AGPL-3.0-or-later",
   "scripts": {
-    "dev": "vite",
     "build": "vue-tsc && vite build",
     "tauri": "tauri",
+    "dev": "vite",
     "lint": "eslint src/**/*.{ts,vue}",
     "format": "prettier --write src/**/*.{ts,vue}"
   },

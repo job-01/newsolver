@@ -66,11 +66,10 @@ pub fn weighted_average(slice: &[f32], weights: &[f32]) -> f64 {
 }
 
 #[tauri::command(async)]
-pub async fn game_init(
-    state: tauri::State<'_, Mutex<AppState>>,
-    oop_range: String,
-    ip_range: String,
-    board: String,
+pub fn game_init(
+    range_state: tauri::State<Mutex<RangeManager>>,
+    game_state: tauri::State<Mutex<PostFlopGame>>,
+    board: Vec<u8>,
     starting_pot: i32,
     effective_stack: i32,
     rake_rate: f64,
@@ -95,13 +94,15 @@ pub async fn game_init(
     merging_threshold: f64,
     added_lines: String,
     removed_lines: String,
-) -> Result<(), String> {
-    let (turn, river, state) = match parse_board(&board) {
-        Ok((flop, turn, river)) => (turn, river, BoardState::from_flop_len(flop.len())),
-        Err(e) => return Err(format!("Invalid board: {}", e)),
+) -> Option<String> {
+    let (turn, river, state) = match board.len() {
+        3 => (NOT_DEALT, NOT_DEALT, BoardState::Flop),
+        4 => (board[3], NOT_DEALT, BoardState::Turn),
+        5 => (board[3], board[4], BoardState::River),
+        _ => return Some("Invalid board length".to_string()),
     };
 
-    let ranges = &state.range_manager.lock().unwrap().0;
+    let ranges = &range_state.lock().unwrap().0;
     let card_config = CardConfig {
         range: ranges[..2].try_into().unwrap(),
         flop: board[..3].try_into().unwrap(),
@@ -140,7 +141,7 @@ pub async fn game_init(
         merging_threshold,
     };
 
-    let mut action_tree = ActionTree::new(tree_config).map_err(|e| e.to_string())?;
+    let mut action_tree = ActionTree::new(tree_config).unwrap();
 
     if !added_lines.is_empty() {
         for added_line in added_lines.split(',') {
@@ -149,7 +150,7 @@ pub async fn game_init(
                 .map(decode_action)
                 .collect::<Vec<_>>();
             if action_tree.add_line(&line).is_err() {
-                return Err("Failed to add line (loaded broken tree?)".to_string());
+                return Some("Failed to add line (loaded broken tree?)".to_string());
             }
         }
     }
@@ -161,42 +162,13 @@ pub async fn game_init(
                 .map(decode_action)
                 .collect::<Vec<_>>();
             if action_tree.remove_line(&line).is_err() {
-                return Err("Failed to remove line (loaded broken tree?)".to_string());
+                return Some("Failed to remove line (loaded broken tree?)".to_string());
             }
         }
     }
 
-    let mut game = state.game.lock().unwrap();
-    *game = PostFlopGame::with_config(card_config, action_tree).map_err(|e| e.to_string())?;
-
-    // Apply allowed runouts if set
-    if let Some(ref allowed) = *state.allowed_runouts.lock().unwrap() {
-        let allowed_cards: Vec<u8> = allowed
-            .iter()
-            .map(|card| {
-                let rank = "23456789TJQKA"
-                    .find(card.chars().next().unwrap())
-                    .unwrap_or(0);
-                let suit = "♠♥♦♣"
-                    .find(card.chars().nth(1).unwrap())
-                    .unwrap_or(0);
-                (rank * 4 + suit) as u8
-            })
-            .collect();
-        println!("Converted allowed cards: {:?}", allowed_cards); // Debug
-
-        let board_cards = game.board(); // Adjust based on postflop-solver API
-        let mut solver_cards = Vec::new();
-        for &card in &allowed_cards {
-            if !board_cards.contains(&card) { // Exclude flop cards
-                solver_cards.push(card);
-            }
-        }
-        // Placeholder: Modify postflop-solver to add set_possible_runouts
-        // game.set_possible_runouts(&solver_cards); // Uncomment when implemented
-    }
-
-    Ok(())
+    let mut game = game_state.lock().unwrap();
+    game.update_config(card_config, action_tree).err()
 }
 
 #[tauri::command]
@@ -224,7 +196,7 @@ pub fn game_memory_usage_bunching(game_state: tauri::State<Mutex<PostFlopGame>>)
 }
 
 #[tauri::command(async)]
-pub async fn game_allocate_memory(
+pub fn game_allocate_memory(
     game_state: tauri::State<Mutex<PostFlopGame>>,
     enable_compression: bool,
 ) {
@@ -233,41 +205,44 @@ pub async fn game_allocate_memory(
 }
 
 #[tauri::command(async)]
-pub async fn game_set_bunching(
+pub fn game_set_bunching(
     bunching_state: tauri::State<Mutex<Option<BunchingData>>>,
     game_state: tauri::State<Mutex<PostFlopGame>>,
-) -> Result<(), String> {
+) -> Option<String> {
     let bunching_data = bunching_state.lock().unwrap();
     let bunching_data = bunching_data.as_ref().unwrap();
     let mut game = game_state.lock().unwrap();
-    game.set_bunching_effect(bunching_data).map_err(|e| e.to_string())
+    game.set_bunching_effect(bunching_data).err()
 }
 
 #[tauri::command(async)]
-pub async fn game_solve_step(
-    state: tauri::State<Mutex<AppState>>,
+pub fn game_solve_step(
+    game_state: tauri::State<Mutex<PostFlopGame>>,
+    pool_state: tauri::State<Mutex<ThreadPool>>,
     current_iteration: u32,
 ) {
-    let game = state.game.lock().unwrap();
-    let pool = state.thread_pool.lock().unwrap();
+    let game = game_state.lock().unwrap();
+    let pool = pool_state.lock().unwrap();
     pool.install(|| solve_step(&*game, current_iteration));
 }
 
 #[tauri::command(async)]
-pub async fn game_exploitability(
-    state: tauri::State<Mutex<AppState>>,
+pub fn game_exploitability(
+    game_state: tauri::State<Mutex<PostFlopGame>>,
+    pool_state: tauri::State<Mutex<ThreadPool>>,
 ) -> f32 {
-    let game = state.game.lock().unwrap();
-    let pool = state.thread_pool.lock().unwrap();
+    let game = game_state.lock().unwrap();
+    let pool = pool_state.lock().unwrap();
     pool.install(|| compute_exploitability(&*game))
 }
 
 #[tauri::command(async)]
-pub async fn game_finalize(
-    state: tauri::State<Mutex<AppState>>,
+pub fn game_finalize(
+    game_state: tauri::State<Mutex<PostFlopGame>>,
+    pool_state: tauri::State<Mutex<ThreadPool>>,
 ) {
-    let pool = state.thread_pool.lock().unwrap();
-    pool.install(|| finalize(&mut *state.game.lock().unwrap()));
+    let pool = pool_state.lock().unwrap();
+    pool.install(|| finalize(&mut *game_state.lock().unwrap()));
 }
 
 #[tauri::command]

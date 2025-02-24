@@ -33,6 +33,9 @@
         <div v-show="store.sideView === 'board'">
           <BoardSelector />
         </div>
+        <div v-show="store.sideView === 'select-runouts'">
+          <SelectRunouts />
+        </div>
         <div v-show="store.sideView === 'tree-config'">
           <TreeConfig />
         </div>
@@ -65,6 +68,7 @@ import NavBar from "./NavBar.vue";
 import SideBar from "./SideBar.vue";
 import RangeEditor from "./RangeEditor.vue";
 import BoardSelector from "./BoardSelector.vue";
+import SelectRunouts from "./SelectRunouts.vue";
 import TreeConfig from "./TreeConfig.vue";
 import BunchingEffect from "./BunchingEffect.vue";
 import RunSolver from "./RunSolver.vue";

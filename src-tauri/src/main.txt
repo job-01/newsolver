@@ -67,6 +67,21 @@ fn main() {
             bunching_init,
             bunching_clear,
             bunching_progress,
+            game_init,
+            game_private_cards,
+            game_memory_usage,
+            game_memory_usage_bunching,
+            game_allocate_memory,
+            game_set_bunching,
+            game_solve_step,
+            game_exploitability,
+            game_finalize,
+            game_apply_history,
+            game_total_bet_amount,
+            game_actions_after,
+            game_possible_cards,
+            game_get_results,
+            game_get_chance_reports,
             set_allowed_runouts // New command
         ])
         .run(tauri::generate_context!())
@@ -115,4 +130,80 @@ fn set_allowed_runouts(
     *allowed_runouts = Some(cards);
     println!("Allowed runouts set to: {:?}", *allowed_runouts); // Debug output
     Ok(())
+}
+
+// Override game_init to apply allowed runouts
+#[tauri::command]
+fn game_init(
+    state: tauri::State<AppState>,
+    oop_range: String,
+    ip_range: String,
+    board: String,
+    starting_pot: i32,
+    effective_stack: i32,
+    rake_rate: f64,
+    rake_cap: f64,
+    donk_option: bool,
+) -> Result<(), String> {
+    let mut game = state.game.lock().unwrap();
+    let range_manager = state.range_manager.lock().unwrap();
+    let action_tree = state.action_tree.lock().unwrap();
+
+    *game = PostFlopGame::with_text(
+        &oop_range,
+        &ip_range,
+        &board,
+        starting_pot,
+        effective_stack,
+        rake_rate,
+        rake_cap,
+        donk_option,
+        &range_manager,
+        &action_tree,
+    )
+    .map_err(|e| e.to_string())?;
+
+    // Apply allowed runouts if set
+    if let Some(ref allowed) = *state.allowed_runouts.lock().unwrap() {
+        let allowed_cards: Vec<u8> = allowed
+            .iter()
+            .map(|card| {
+                let rank = "23456789TJQKA"
+                    .find(card.chars().next().unwrap())
+                    .unwrap_or(0);
+                let suit = "♠♥♦♣"
+                    .find(card.chars().nth(1).unwrap())
+                    .unwrap_or(0);
+                (rank * 4 + suit) as u8
+            })
+            .collect();
+        println!("Converted allowed cards: {:?}", allowed_cards); // Debug
+
+        // Filter turn/river cards (pseudo-code, adjust to PostFlopGame)
+        let board_cards = game.board();
+        let mut solver_cards = Vec::new();
+        for &card in &allowed_cards {
+            if !board_cards.contains(&card) {
+                solver_cards.push(card);
+            }
+        }
+        // Note: PostFlopGame doesn’t have a direct method to set runouts natively.
+        // We’ll need to modify game initialization or solver logic.
+    }
+
+    Ok(())
+}
+
+// Optionally override game_solve_step to respect runouts
+#[tauri::command]
+fn game_solve_step(
+    state: tauri::State<AppState>,
+    num_iterations: i32,
+) -> Result<f64, String> {
+    let mut game = state.game.lock().unwrap();
+    let pool = state.thread_pool.lock().unwrap();
+
+    // TODO: Ensure solver respects allowed_runouts during iterations
+    pool.install(|| game.solve_step(num_iterations));
+    Ok(game.compute_average_ev(0))
 }

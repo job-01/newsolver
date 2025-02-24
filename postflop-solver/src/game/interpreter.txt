@@ -117,7 +117,7 @@ impl PostFlopGame {
         }
     }
 
-    /// If the current node is a chance node, returns a list of cards that can be dealt, restricted to allowed runouts.
+    /// If the current node is a chance node, returns a list of cards that can be dealt.
     ///
     /// The returned value is a 64-bit integer.
     /// The `i`-th bit is set to 1 if the card of ID `i` can be dealt (see [`Card`] for encoding).
@@ -135,7 +135,7 @@ impl PostFlopGame {
         let mut board_mask: u64 = (1 << flop[0]) | (1 << flop[1]) | (1 << flop[2]);
         let mut dead_mask: u64 = 0;
 
-        // Existing logic for determining dead cards (no bunching)
+        // no bunching
         if self.bunching_num_dead_cards == 0 {
             if self.turn != NOT_DEALT {
                 board_mask |= 1 << self.turn;
@@ -164,7 +164,7 @@ impl PostFlopGame {
                 dead_mask |= bit_card;
             }
         }
-        // Existing bunching logic remains unchanged (handled similarly)
+        // bunching
         else {
             let node_turn = self.node().turn;
             if node_turn != NOT_DEALT {
@@ -222,12 +222,7 @@ impl PostFlopGame {
             }
         }
 
-        // Apply allowed_cards restriction
-        let allowed_mask = self.allowed_cards.as_ref().map_or(((1 << 52) - 1) ^ dead_mask, |cards| {
-            cards.iter().fold(0u64, |acc, &card| acc | (1 << card))
-        });
-
-        ((1 << 52) - 1) ^ dead_mask & allowed_mask // Intersect with allowed cards
+        ((1 << 52) - 1) ^ dead_mask
     }
 
     /// Returns the current player (0 = OOP, 1 = IP).
@@ -262,7 +257,20 @@ impl PostFlopGame {
         ret
     }
 
-    /// Plays the given action, ensuring it respects allowed runouts for chance nodes.
+    /// Plays the given action. Playing an action from a terminal node is not allowed.
+    ///
+    /// - `action`
+    ///   - If the current node is a chance node, the `action` corresponds to the dealt card (see
+    ///     [`Card`] for encoding). If `usize::MAX` is passed, the card is selected as the possible
+    ///     card with the lowest index.
+    ///   - If the current node is not a chance node, plays the `action`-th action of
+    ///     [`available_actions`].
+    ///
+    /// Panics if the memory is not yet allocated or the current node is a terminal node.
+    ///
+    /// **Time complexity:** *O*(#(OOP private hands) + #(IP private hands))
+    ///
+    /// [`available_actions`]: #method.available_actions
     pub fn play(&mut self, action: usize) {
         if self.state < State::MemoryAllocated {
             panic!("Memory is not allocated");
@@ -272,7 +280,7 @@ impl PostFlopGame {
             panic!("Terminal node is not allowed");
         }
 
-        // Chance node
+        // chance node
         if self.is_chance_node() {
             let is_turn = self.turn == NOT_DEALT;
             if self.storage_mode == BoardState::Flop
@@ -282,28 +290,12 @@ impl PostFlopGame {
             }
 
             let actual_card = if action == usize::MAX {
-                // Find the lowest valid card from possible_cards, respecting allowed_cards
-                let possible = self.possible_cards();
-                let mut card = possible.trailing_zeros() as Card;
-                while card < 52 && (possible & (1 << card)) == 0 {
-                    card += 1;
-                }
-                if card >= 52 {
-                    panic!("No valid card found in possible_cards");
-                }
-                card
+                self.possible_cards().trailing_zeros() as Card
             } else {
                 action as Card
             };
 
-            // Validate against allowed_cards
-            if let Some(ref allowed) = self.allowed_cards {
-                if !allowed.contains(&actual_card) {
-                    panic!("Card {} not in allowed runouts", actual_card);
-                }
-            }
-
-            // Swap the suit if swapping was performed in turn (existing logic)
+            // swap the suit if swapping was performed in turn
             let action_card = if let Some((suit1, suit2)) = self.turn_swapped_suit {
                 if actual_card & 3 == suit1 {
                     actual_card - suit1 + suit2
@@ -319,7 +311,7 @@ impl PostFlopGame {
             let actions = self.available_actions();
             let mut action_index = usize::MAX;
 
-            // Find the action index from available actions
+            // find the action index from available actions
             for (i, &action) in actions.iter().enumerate() {
                 if action == Action::Chance(action_card) {
                     action_index = i;
@@ -327,7 +319,7 @@ impl PostFlopGame {
                 }
             }
 
-            // Find the action index from isomorphic chances (existing logic)
+            // find the action index from isomorphic chances
             if action_index == usize::MAX {
                 let node = self.node();
                 let isomorphism = self.isomorphic_chances(&node);
@@ -359,11 +351,12 @@ impl PostFlopGame {
                 }
             }
 
+            // panic if the action is not found
             if action_index == usize::MAX {
                 panic!("Invalid action");
             }
 
-            // Update the state
+            // update the state
             let node_index = self.node_index(&self.node().play(action_index));
             self.node_history.push(node_index);
             if is_turn {
@@ -372,12 +365,12 @@ impl PostFlopGame {
                 self.river = actual_card;
             }
 
-            // Update the weights
+            // update the weights
             self.assign_zero_weights();
         }
-        // Player node
+        // player node
         else {
-            // Panic if the action is invalid
+            // panic if the action is invalid
             let node = self.node();
             if action >= node.num_actions() {
                 panic!("Invalid action");
@@ -386,14 +379,14 @@ impl PostFlopGame {
             let player = node.player();
             let num_hands = self.num_private_hands(player);
 
-            // Update the weights
+            // update the weights
             if node.num_actions() > 1 {
                 let strategy = self.strategy();
                 let weights = row(&strategy, action, num_hands);
                 mul_slice(&mut self.weights[player], weights);
             }
 
-            // Cache the counterfactual values
+            // cache the counterfactual values
             let node = self.node();
             let vec = if self.is_compression_enabled {
                 let slice = row(node.cfvalues_compressed(), action, num_hands);
@@ -404,7 +397,7 @@ impl PostFlopGame {
             };
             self.cfvalues_cache[player].copy_from_slice(&vec);
 
-            // Update the bet amounts
+            // update the bet amounts
             let node = self.node();
             match node.play(action).prev_action {
                 Action::Call => {
@@ -421,7 +414,7 @@ impl PostFlopGame {
                 _ => {}
             }
 
-            // Update the node
+            // update the node
             let node_index = self.node_index(&self.node().play(action));
             self.node_history.push(node_index);
         }
@@ -441,7 +434,7 @@ impl PostFlopGame {
     ///
     /// [`normalized_weights`]: #method.normalized_weights
     /// [`equity`]: #method.equity
-    /// [`expected_values`:]: #method.expected_values
+    /// [`expected_values`]: #method.expected_values
     /// [`expected_values_detail`]: #method.expected_values_detail
     pub fn cache_normalized_weights(&mut self) {
         if self.state <= State::Uninitialized {
@@ -452,7 +445,7 @@ impl PostFlopGame {
             return;
         }
 
-        // No bunching
+        // no bunching
         if self.bunching_num_dead_cards == 0 {
             let mut board_mask: u64 = 0;
             if self.turn != NOT_DEALT {
@@ -513,7 +506,7 @@ impl PostFlopGame {
                     });
             }
         }
-        // Bunching
+        // bunching
         else {
             let mut weights_buf = [Vec::new(), Vec::new()];
             let weights = if self.turn_swap.is_none() && self.river_swap.is_none() {
@@ -715,7 +708,7 @@ impl PostFlopGame {
     /// - (with bunching and the current node is terminal) *O*(#(OOP private hands) * #(IP private hands)).
     /// - (otherwise) *O*(#(actions) * #(private hands)).
     ///
-    /// [`expected_values`]: #method.expected_values
+    /// [`expected_values`]: #method.expected_value
     /// [`cache_normalized_weights`]: #method.cache_normalized_weights
     pub fn expected_values_detail(&self, player: usize) -> Vec<f32> {
         if self.state != State::Solved {
@@ -1219,7 +1212,7 @@ impl PostFlopGame {
                 })
                 .collect()
         }
-        // Showdown
+        // showdown
         else {
             let pair_index = card_pair_to_index(node.turn, node.river);
             let indices = &self.bunching_num_river[player][pair_index];
@@ -1246,35 +1239,5 @@ impl PostFlopGame {
                 })
                 .collect()
         }
-    }
-
-    /// Sets the allowed runouts for turn/river cards.
-    pub fn set_allowed_runouts(&mut self, allowed_cards: &[u8]) -> Result<(), String> {
-        if self.state <= State::Uninitialized {
-            return Err("Game is not successfully initialized".to_string());
-        }
-
-        // Validate cards are within bounds and not duplicates
-        let mut seen = [false; 52];
-        for &card in allowed_cards {
-            if card >= 52 {
-                return Err(format!("Invalid card index: {}", card));
-            }
-            if seen[card as usize] {
-                return Err(format!("Duplicate card in allowed runouts: {}", card));
-            }
-            seen[card as usize] = true;
-        }
-
-        // Ensure allowed cards don’t overlap with flop
-        let flop_mask: u64 = self.card_config.flop.iter().map(|&c| 1 << c).sum();
-        for &card in allowed_cards {
-            if (1 << card) & flop_mask != 0 {
-                return Err(format!("Card {} overlaps with flop", card));
-            }
-        }
-
-        self.allowed_cards = Some(allowed_cards.to_vec());
-        Ok(())
     }
 }
