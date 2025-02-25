@@ -581,7 +581,8 @@ const buildTree = async () => {
     tmpConfig.forceAllInThreshold / 100,
     tmpConfig.mergingThreshold / 100,
     tmpConfig.addedLines,
-    tmpConfig.removedLines
+    tmpConfig.removedLines,
+    tmpConfig.allowedRunouts, // Pass the allowed runouts
   );
 
   if (errorString) {

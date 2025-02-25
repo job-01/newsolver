@@ -1,114 +1,70 @@
+// Updated SelectRunouts.vue
 <template>
-  <div class="select-runouts mx-4">
+  <div>
     <h2 class="text-xl font-semibold mb-4">Select Turn/River Cards</h2>
-    <div class="flex justify-between mb-4">
-      <button
-        class="px-4 py-2 bg-green-500 text-white rounded hover:bg-green-600"
-        @click="selectAll"
-      >
+    
+    <div class="flex mb-4 gap-3">
+      <button class="button-base button-blue" @click="selectAll">
         Select All
       </button>
-      <button
-        class="px-4 py-2 bg-red-500 text-white rounded hover:bg-red-600"
-        @click="deselectAll"
-      >
+      <button class="button-base button-red" @click="deselectAll">
         Deselect All
       </button>
     </div>
-    <div class="card-grid">
-      <div
-        v-for="card in allCards"
-        :key="card"
-        :class="[
-          'card',
-          { 'selected': selectedCards.includes(card) },
-          suitColor(card),
-        ]"
-        @click="toggleCard(card)"
-      >
-        {{ card }}
+    
+    <div class="flex flex-wrap">
+      <div v-for="suit in 4" :key="suit" class="flex mb-3">
+        <BoardSelectorCard
+          v-for="rank in 13"
+          :key="rank"
+          class="m-1"
+          :card-id="56 - 4 * rank - suit"
+          :is-selected="selectedRunouts.includes(56 - 4 * rank - suit)"
+          @click="toggleCard(56 - 4 * rank - suit)"
+        />
       </div>
     </div>
-    <button
-      class="mt-4 px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600"
-      @click="saveRunouts"
-    >
-      Save Runouts
-    </button>
+    
+    <div class="flex mt-4 gap-3">
+      <button class="button-base button-blue" @click="saveRunouts">
+        Save Runouts
+      </button>
+    </div>
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref } from "vue";
-import { invoke } from "@tauri-apps/api/tauri";
+import { useStore, useConfigStore } from "../store";
+import BoardSelectorCard from "./BoardSelectorCard.vue";
+import { parseCardString, cardText } from "../utils";
 
-const SUITS = ["♠", "♥", "♦", "♣"];
-const RANKS = ["2", "3", "4", "5", "6", "7", "8", "9", "T", "J", "Q", "K", "A"];
-const allCards = SUITS.flatMap((suit) => RANKS.map((rank) => `${rank}${suit}`));
-const selectedCards = ref<string[]>([]);
+const config = useConfigStore();
+const store = useStore();
 
-const toggleCard = (card: string) => {
-  if (selectedCards.value.includes(card)) {
-    selectedCards.value = selectedCards.value.filter((c) => c !== card);
+// Initialize with all cards selected by default
+const selectedRunouts = ref<number[]>(
+  Array.from({ length: 52 }, (_, i) => i)
+);
+
+const toggleCard = (cardId: number) => {
+  if (selectedRunouts.value.includes(cardId)) {
+    selectedRunouts.value = selectedRunouts.value.filter(id => id !== cardId);
   } else {
-    selectedCards.value.push(card);
+    selectedRunouts.value.push(cardId);
   }
-};
-
-const suitColor = (card: string) => {
-  const suit = card.slice(-1);
-  return suit === "♥" || suit === "♦" ? "text-red-600" : "text-black";
 };
 
 const selectAll = () => {
-  selectedCards.value = [...allCards]; // Select all 52 cards
+  selectedRunouts.value = Array.from({ length: 52 }, (_, i) => i);
 };
 
 const deselectAll = () => {
-  selectedCards.value = []; // Deselect all cards
+  selectedRunouts.value = [];
 };
 
-const saveRunouts = async () => {
-  try {
-    await invoke("set_allowed_runouts", { cards: selectedCards.value });
-    alert("Runouts saved successfully!");
-  } catch (error) {
-    console.error("Failed to save runouts:", error);
-    alert("Error saving runouts.");
-  }
+const saveRunouts = () => {
+  // Store the selected runouts in the config store
+  config.allowedRunouts = [...selectedRunouts.value];
 };
 </script>
-
-<style scoped>
-.select-runouts {
-  padding: 1rem;
-}
-
-.card-grid {
-  display: grid;
-  grid-template-columns: repeat(13, 2.5rem);
-  gap: 0.25rem;
-}
-
-.card {
-  width: 2.5rem;
-  height: 3.5rem;
-  border: 1px solid #ccc;
-  border-radius: 0.25rem;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  cursor: pointer;
-  user-select: none;
-  transition: background-color 0.2s;
-}
-
-.card:hover {
-  background-color: #f0f0f0;
-}
-
-.card.selected {
-  background-color: #4caf50;
-  color: white;
-}
-</style>

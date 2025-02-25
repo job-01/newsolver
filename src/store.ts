@@ -44,6 +44,7 @@ export const saveConfigTmp = () => {
     expectedBoardLength: config.expectedBoardLength,
     addedLines: config.addedLines,
     removedLines: config.removedLines,
+    allowedRunouts: [...config.allowedRunouts],
   });
 };
 
@@ -78,6 +79,7 @@ export const saveConfig = () => {
     expectedBoardLength: tmpConfig.expectedBoardLength,
     addedLines: tmpConfig.addedLines,
     removedLines: tmpConfig.removedLines,
+    allowedRunouts: [...tmpConfig.allowedRunouts],
   });
 };
 
@@ -149,6 +151,7 @@ export const useConfigStore = defineStore("config", {
     expectedBoardLength: 0,
     addedLines: "",
     removedLines: "",
+    allowedRunouts: Array.from({ length: 52 }, (_, i) => i), // Default: all cards allowed
   }),
 
   getters: {
@@ -197,6 +200,7 @@ export const useTmpConfigStore = defineStore("tmpConfig", {
     expectedBoardLength: 0,
     addedLines: "",
     removedLines: "",
+    allowedRunouts: [] as number[],
   }),
 });
 
@@ -228,5 +232,6 @@ export const useSavedConfigStore = defineStore("savedConfig", {
     expectedBoardLength: 0,
     addedLines: "",
     removedLines: "",
+    allowedRunouts: [] as number[],
   }),
 });
