@@ -207,7 +207,7 @@ export const gameInit = async (
   mergingThreshold: number,
   addedLines: string,
   removedLines: string,
-  allowedRunouts: number[] = []
+  allowedRunouts: number[] = [] 
 ): Promise<string | null> => {
   return await invoke("game_init", {
     board,

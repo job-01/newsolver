@@ -11,6 +11,8 @@ fn decode_signed_slice(slice: &[i16], scale: f32) -> Vec<f32> {
 }
 
 impl PostFlopGame {
+    
+
     /// Moves the current node back to the root node.
     #[inline]
     pub fn back_to_root(&mut self) {
@@ -122,6 +124,8 @@ impl PostFlopGame {
     /// The returned value is a 64-bit integer.
     /// The `i`-th bit is set to 1 if the card of ID `i` can be dealt (see [`Card`] for encoding).
     /// If the current node is not a chance node, `0` is returned.
+    
+    /// Returns the possible cards that can be dealt, restricted to allowed runouts.
     pub fn possible_cards(&self) -> u64 {
         if self.state <= State::Uninitialized {
             panic!("Game is not successfully initialized");
@@ -262,6 +266,7 @@ impl PostFlopGame {
         ret
     }
 
+    
     /// Plays the given action, ensuring it respects allowed runouts for chance nodes.
     pub fn play(&mut self, action: usize) {
         if self.state < State::MemoryAllocated {
@@ -1248,7 +1253,6 @@ impl PostFlopGame {
         }
     }
 
-    /// Sets the allowed runouts for turn/river cards.
     pub fn set_allowed_runouts(&mut self, allowed_cards: &[u8]) -> Result<(), String> {
         if self.state <= State::Uninitialized {
             return Err("Game is not successfully initialized".to_string());
@@ -1266,7 +1270,7 @@ impl PostFlopGame {
             seen[card as usize] = true;
         }
 
-        // Ensure allowed cards don’t overlap with flop
+        // Ensure allowed cards don't overlap with flop
         let flop_mask: u64 = self.card_config.flop.iter().map(|&c| 1 << c).sum();
         for &card in allowed_cards {
             if (1 << card) & flop_mask != 0 {

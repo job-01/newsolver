@@ -112,6 +112,7 @@ pub struct PostFlopGame {
     weights: [Vec<f32>; 2],
     normalized_weights: [Vec<f32>; 2],
     cfvalues_cache: [Vec<f32>; 2],
+    allowed_cards: Option<Vec<u8>>,
 }
 
 /// A struct representing a node in a postflop game tree.

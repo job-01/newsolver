@@ -1,8 +1,75 @@
-use crate::range::*;
+use crate::range::*; //unused?
 use postflop_solver::*;
-use rayon::ThreadPool;
+use rayon::ThreadPool; //unused?
 use serde::Serialize;
 use std::sync::Mutex;
+use crate::AppState;
+
+
+// Define a simple state enum (adjust based on your needs)
+#[derive(Debug)]
+enum BoardState {
+    Flop,
+    Turn,
+    River,
+}
+
+impl BoardState {
+    pub fn from_card_count(count: usize) -> Self {
+        match count {
+            3 => BoardState::Flop,
+            4 => BoardState::Turn,
+            5 => BoardState::River,
+            _ => panic!("Invalid card count: {}", count), // Or return a default/error
+        }
+    }
+}
+
+fn parse_board(board: &str) -> Result<(Vec<u8>, Option<u8>, Option<u8>), String> {
+    let cards: Vec<&str> = board.split_whitespace().collect();
+    if cards.len() < 3 || cards.len() > 5 {
+        return Err(format!(
+            "Invalid board: '{}'. Expected 3-5 cards (e.g., 'Ah Kh Qh' or 'Ah Kh Qh Kd As')",
+            board
+        ));
+    }
+
+    // Parse flop (always 3 cards)
+    let flop: Vec<u8> = cards[0..3]
+        .iter()
+        .map(|&c| card_from_str(c))
+        .collect::<Result<Vec<u8>, String>>()?;
+
+    // Parse turn and river if present
+    let turn = if cards.len() >= 4 {
+        Some(card_from_str(cards[3])?)
+    } else {
+        None
+    };
+    let river = if cards.len() == 5 {
+        Some(card_from_str(cards[4])?)
+    } else {
+        None
+    };
+
+    Ok((flop, turn, river))
+}
+
+fn card_from_str(card: &str) -> Result<u8, String> {
+    let ranks = "23456789TJQKA";
+    let suits = "cdhs";
+    if card.len() != 2 {
+        return Err(format!("Invalid card format: '{}'", card));
+    }
+    let rank = ranks
+        .find(card.chars().nth(0).unwrap())
+        .ok_or_else(|| format!("Invalid rank in card: '{}'", card))? as u8;
+    let suit = suits
+        .find(card.chars().nth(1).unwrap())
+        .ok_or_else(|| format!("Invalid suit in card: '{}'", card))? as u8;
+    Ok(rank * 4 + suit) // 0-51: 2c=0, As=51
+}
+
 
 #[inline]
 fn decode_action(action: &str) -> Action {
@@ -97,9 +164,13 @@ pub async fn game_init(
     removed_lines: String,
 ) -> Result<(), String> {
     let (turn, river, state) = match parse_board(&board) {
-        Ok((flop, turn, river)) => (turn, river, BoardState::from_flop_len(flop.len())),
+        Ok((flop, turn, river)) => {
+            let total_cards = flop.len() + turn.is_some() as usize + river.is_some() as usize;
+            (turn, river, BoardState::from_card_count(total_cards))
+        }
         Err(e) => return Err(format!("Invalid board: {}", e)),
     };
+    
 
     let ranges = &state.range_manager.lock().unwrap().0;
     let card_config = CardConfig {
@@ -225,17 +296,18 @@ pub fn game_memory_usage_bunching(game_state: tauri::State<Mutex<PostFlopGame>>)
 
 #[tauri::command(async)]
 pub async fn game_allocate_memory(
-    game_state: tauri::State<Mutex<PostFlopGame>>,
+    game_state: tauri::State<'_, Mutex<PostFlopGame>>,
     enable_compression: bool,
-) {
+) -> Result<(), String> {  // Change return type to Result<(), String>
     let mut game = game_state.lock().unwrap();
     game.allocate_memory(enable_compression);
+    Ok(())  // Return Ok(()) to indicate success
 }
 
 #[tauri::command(async)]
 pub async fn game_set_bunching(
-    bunching_state: tauri::State<Mutex<Option<BunchingData>>>,
-    game_state: tauri::State<Mutex<PostFlopGame>>,
+    bunching_state: tauri::State<'_, Mutex<Option<BunchingData>>>,
+    game_state: tauri::State<'_, Mutex<PostFlopGame>>,
 ) -> Result<(), String> {
     let bunching_data = bunching_state.lock().unwrap();
     let bunching_data = bunching_data.as_ref().unwrap();
@@ -245,9 +317,9 @@ pub async fn game_set_bunching(
 
 #[tauri::command(async)]
 pub async fn game_solve_step(
-    state: tauri::State<Mutex<AppState>>,
+    state: tauri::State<'_, Mutex<AppState>>,
     current_iteration: u32,
-) {
+) -> Result<(), String> {
     let game = state.game.lock().unwrap();
     let pool = state.thread_pool.lock().unwrap();
     pool.install(|| solve_step(&*game, current_iteration));
@@ -255,8 +327,8 @@ pub async fn game_solve_step(
 
 #[tauri::command(async)]
 pub async fn game_exploitability(
-    state: tauri::State<Mutex<AppState>>,
-) -> f32 {
+    state: tauri::State<'_, Mutex<AppState>>,
+) -> Result<(), String> {
     let game = state.game.lock().unwrap();
     let pool = state.thread_pool.lock().unwrap();
     pool.install(|| compute_exploitability(&*game))
@@ -264,8 +336,8 @@ pub async fn game_exploitability(
 
 #[tauri::command(async)]
 pub async fn game_finalize(
-    state: tauri::State<Mutex<AppState>>,
-) {
+    state: tauri::State<'_, Mutex<AppState>>,
+) -> Result<(), String> {
     let pool = state.thread_pool.lock().unwrap();
     pool.install(|| finalize(&mut *state.game.lock().unwrap()));
 }
