@@ -4,7 +4,7 @@ version = "0.2.7"
 description = "The most advanced open-source GTO solver"
 authors = ["Wataru Inariba"]
 license = "AGPL-3.0-or-later"
-repository = "https://github.com/b-inary/desktop-postflop/tree/main/src-tauri"
+repository = "https://github.com/job-01/newsolver"
 edition = "2021"
 rust-version = "1.65"
 

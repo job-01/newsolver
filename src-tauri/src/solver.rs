@@ -1,10 +1,9 @@
-use crate::range::*; //unused?
 use postflop_solver::*;
-use rayon::ThreadPool; //unused?
 use serde::Serialize;
 use std::sync::Mutex;
+use tauri::State;
 use crate::AppState;
-
+use rayon::ThreadPool;
 
 // Define a simple state enum (adjust based on your needs)
 #[derive(Debug)]
@@ -20,7 +19,7 @@ impl BoardState {
             3 => BoardState::Flop,
             4 => BoardState::Turn,
             5 => BoardState::River,
-            _ => panic!("Invalid card count: {}", count), // Or return a default/error
+            _ => panic!("Invalid card count: {}", count),
         }
     }
 }
@@ -67,9 +66,8 @@ fn card_from_str(card: &str) -> Result<u8, String> {
     let suit = suits
         .find(card.chars().nth(1).unwrap())
         .ok_or_else(|| format!("Invalid suit in card: '{}'", card))? as u8;
-    Ok(rank * 4 + suit) // 0-51: 2c=0, As=51
+    Ok(rank * 4 + suit)
 }
-
 
 #[inline]
 fn decode_action(action: &str) -> Action {
@@ -163,25 +161,23 @@ pub async fn game_init(
     added_lines: String,
     removed_lines: String,
 ) -> Result<(), String> {
-    let (turn, river, state) = match parse_board(&board) {
-        Ok((flop, turn, river)) => {
-            let total_cards = flop.len() + turn.is_some() as usize + river.is_some() as usize;
-            (turn, river, BoardState::from_card_count(total_cards))
-        }
+    let (flop, turn, river) = match parse_board(&board) {
+        Ok((flop, turn, river)) => (flop, turn, river),
         Err(e) => return Err(format!("Invalid board: {}", e)),
     };
-    
 
-    let ranges = &state.range_manager.lock().unwrap().0;
+    let state_enum = BoardState::from_card_count(flop.len() + turn.is_some() as usize + river.is_some() as usize);
+
+    let ranges = &state.lock().unwrap().range_manager.lock().unwrap().0;
     let card_config = CardConfig {
         range: ranges[..2].try_into().unwrap(),
-        flop: board[..3].try_into().unwrap(),
-        turn,
-        river,
+        flop: flop.try_into().unwrap(),
+        turn: turn.ok_or_else(|| "Missing turn card")?,
+        river: river.ok_or_else(|| "Missing river card")?,
     };
 
     let tree_config = TreeConfig {
-        initial_state: state,
+        initial_state: state_enum,
         starting_pot,
         effective_stack,
         rake_rate,
@@ -198,13 +194,15 @@ pub async fn game_init(
             BetSizeOptions::try_from((oop_river_bet.as_str(), oop_river_raise.as_str())).unwrap(),
             BetSizeOptions::try_from((ip_river_bet.as_str(), ip_river_raise.as_str())).unwrap(),
         ],
-        turn_donk_sizes: match donk_option {
-            false => None,
-            true => DonkSizeOptions::try_from(oop_turn_donk.as_str()).ok(),
+        turn_donk_sizes: if donk_option {
+            Some(DonkSizeOptions::try_from(oop_turn_donk.as_str()).unwrap())
+        } else {
+            None
         },
-        river_donk_sizes: match donk_option {
-            false => None,
-            true => DonkSizeOptions::try_from(oop_river_donk.as_str()).ok(),
+        river_donk_sizes: if donk_option {
+            Some(DonkSizeOptions::try_from(oop_river_donk.as_str()).unwrap())
+        } else {
+            None
         },
         add_allin_threshold,
         force_allin_threshold,
@@ -237,11 +235,10 @@ pub async fn game_init(
         }
     }
 
-    let mut game = state.game.lock().unwrap();
+    let mut game = state.lock().unwrap().game.lock().unwrap();
     *game = PostFlopGame::with_config(card_config, action_tree).map_err(|e| e.to_string())?;
 
-    // Apply allowed runouts if set
-    if let Some(ref allowed) = *state.allowed_runouts.lock().unwrap() {
+    if let Some(ref allowed) = *state.lock().unwrap().allowed_runouts.lock().unwrap() {
         let allowed_cards: Vec<u8> = allowed
             .iter()
             .map(|card| {
@@ -254,17 +251,17 @@ pub async fn game_init(
                 (rank * 4 + suit) as u8
             })
             .collect();
-        println!("Converted allowed cards: {:?}", allowed_cards); // Debug
+        println!("Converted allowed cards: {:?}", allowed_cards);
 
-        let board_cards = game.board(); // Adjust based on postflop-solver API
+        let board_cards = game.board();
         let mut solver_cards = Vec::new();
         for &card in &allowed_cards {
-            if !board_cards.contains(&card) { // Exclude flop cards
+            if !board_cards.contains(&card) {
                 solver_cards.push(card);
             }
         }
         // Placeholder: Modify postflop-solver to add set_possible_runouts
-        // game.set_possible_runouts(&solver_cards); // Uncomment when implemented
+        // game.set_possible_runouts(&solver_cards);
     }
 
     Ok(())
@@ -298,10 +295,10 @@ pub fn game_memory_usage_bunching(game_state: tauri::State<Mutex<PostFlopGame>>)
 pub async fn game_allocate_memory(
     game_state: tauri::State<'_, Mutex<PostFlopGame>>,
     enable_compression: bool,
-) -> Result<(), String> {  // Change return type to Result<(), String>
+) -> Result<(), String> {
     let mut game = game_state.lock().unwrap();
     game.allocate_memory(enable_compression);
-    Ok(())  // Return Ok(()) to indicate success
+    Ok(())
 }
 
 #[tauri::command(async)]
@@ -320,26 +317,29 @@ pub async fn game_solve_step(
     state: tauri::State<'_, Mutex<AppState>>,
     current_iteration: u32,
 ) -> Result<(), String> {
-    let game = state.game.lock().unwrap();
-    let pool = state.thread_pool.lock().unwrap();
+    let game = state.lock().unwrap().game.lock().unwrap();
+    let pool = state.lock().unwrap().thread_pool.lock().unwrap();
     pool.install(|| solve_step(&*game, current_iteration));
+    Ok(())
 }
 
 #[tauri::command(async)]
 pub async fn game_exploitability(
     state: tauri::State<'_, Mutex<AppState>>,
 ) -> Result<(), String> {
-    let game = state.game.lock().unwrap();
-    let pool = state.thread_pool.lock().unwrap();
-    pool.install(|| compute_exploitability(&*game))
+    let game = state.lock().unwrap().game.lock().unwrap();
+    let pool = state.lock().unwrap().thread_pool.lock().unwrap();
+    pool.install(|| compute_exploitability(&*game));
+    Ok(())
 }
 
 #[tauri::command(async)]
 pub async fn game_finalize(
     state: tauri::State<'_, Mutex<AppState>>,
 ) -> Result<(), String> {
-    let pool = state.thread_pool.lock().unwrap();
-    pool.install(|| finalize(&mut *state.game.lock().unwrap()));
+    let pool = state.lock().unwrap().thread_pool.lock().unwrap();
+    pool.install(|| finalize(&mut *state.lock().unwrap().game.lock().unwrap()));
+    Ok(())
 }
 
 #[tauri::command]
@@ -488,144 +488,153 @@ pub fn game_get_results(game_state: tauri::State<Mutex<PostFlopGame>>) -> GameRe
         ev[1].extend(round_iter(ev_raw[1].iter()));
 
         for player in 0..2 {
-            let pot = eqr_base[player] as f64;
-            for (&eq, &ev) in equity_raw[player].iter().zip(ev_raw[player].iter()) {
-                let (eq, ev) = (eq as f64, ev as f64);
-                if eq < 5e-7 {
-                    eqr[player].push(ev / 0.0);
-                } else {
-                    eqr[player].push(round(ev / (pot * eq)));
+            let pot = eqr_base[player] as game.equity(1)];
+
+            equity[0].extend(round_iter(equity_raw[0].iter()));
+            equity[1].extend(round_iter(equity_raw[1].iter()));
+            ev[0].extend(round_iter(ev_raw[0].iter()));
+            ev[1].extend(round_iter(ev_raw[1].iter()));
+    
+            for player in 0..2 {
+                let pot = eqr_base[player] as f64;
+                for (&eq, &ev) in equity_raw[player].iter().zip(ev_raw[player].iter()) {
+                    let (eq, ev) = (eq as f64, ev as f64);
+                    if eq < 5e-7 {
+                        eqr[player].push(ev / 0.0);
+                    } else {
+                        eqr[player].push(round(ev / (pot * eq)));
+                    }
                 }
             }
         }
-    }
-
-    let mut strategy = Vec::new();
-    let mut action_ev = Vec::new();
-
-    if !game.is_terminal_node() && !game.is_chance_node() {
-        strategy.extend(round_iter(game.strategy().iter()));
-        if is_empty_flag == 0 {
-            action_ev.extend(round_iter(
-                game.expected_values_detail(game.current_player()).iter(),
-            ));
-        }
-    }
-
-    GameResultsResponse {
-        current_player: current_player(&game),
-        num_actions: num_actions(&game),
-        is_empty: is_empty_flag,
-        eqr_base,
-        weights,
-        normalizer,
-        equity,
-        ev,
-        eqr,
-        strategy,
-        action_ev,
-    }
-}
-
-#[derive(Serialize)]
-pub struct GameChanceReportsResponse {
-    status: Vec<i32>,
-    combos: [Vec<f64>; 2],
-    equity: [Vec<f64>; 2],
-    ev: [Vec<f64>; 2],
-    eqr: [Vec<f64>; 2],
-    strategy: Vec<f64>,
-}
-
-#[tauri::command]
-pub fn game_get_chance_reports(
-    game_state: tauri::State<Mutex<PostFlopGame>>,
-    append: Vec<isize>,
-    num_actions: usize,
-) -> GameChanceReportsResponse {
-    let mut game = game_state.lock().unwrap();
-    let history = game.history().to_vec();
-
-    let mut status = vec![0; 52]; // 0: not possible, 1: empty, 2: not empty
-    let mut combos = [vec![0.0; 52], vec![0.0; 52]];
-    let mut equity = [vec![0.0; 52], vec![0.0; 52]];
-    let mut ev = [vec![0.0; 52], vec![0.0; 52]];
-    let mut eqr = [vec![0.0; 52], vec![0.0; 52]];
-    let mut strategy = vec![0.0; num_actions * 52];
-
-    let possible_cards = game.possible_cards();
-    for chance in 0..52 {
-        if possible_cards & (1 << chance) == 0 {
-            continue;
-        }
-
-        game.play(chance);
-        for &action in &append[1..] {
-            game.play(action_usize(action));
-        }
-
-        let trunc = |&w: &f32| if w < 0.0005 { 0.0 } else { w };
-        let weights = [
-            game.weights(0).iter().map(trunc).collect::<Vec<_>>(),
-            game.weights(1).iter().map(trunc).collect::<Vec<_>>(),
-        ];
-
-        combos[0][chance] = round(weights[0].iter().fold(0.0, |acc, &w| acc + w as f64));
-        combos[1][chance] = round(weights[1].iter().fold(0.0, |acc, &w| acc + w as f64));
-
-        let is_empty = |player: usize| weights[player].iter().all(|&w| w == 0.0);
-        let is_empty_flag = [is_empty(0), is_empty(1)];
-
-        game.cache_normalized_weights();
-        let normalizer = [game.normalized_weights(0), game.normalized_weights(1)];
-
-        if !game.is_terminal_node() {
-            let current_player = game.current_player();
-            if !is_empty_flag[current_player] {
-                let strategy_tmp = game.strategy();
-                let num_hands = game.private_cards(current_player).len();
-                let ws = if is_empty_flag[current_player ^ 1] {
-                    &weights[current_player]
-                } else {
-                    normalizer[current_player]
-                };
-                for action in 0..num_actions {
-                    let slice = &strategy_tmp[action * num_hands..(action + 1) * num_hands];
-                    let strategy_summary = weighted_average(slice, ws);
-                    strategy[action * 52 + chance] = round(strategy_summary);
-                }
+    
+        let mut strategy = Vec::new();
+        let mut action_ev = Vec::new();
+    
+        if !game.is_terminal_node() && !game.is_chance_node() {
+            strategy.extend(round_iter(game.strategy().iter()));
+            if is_empty_flag == 0 {
+                action_ev.extend(round_iter(
+                    game.expected_values_detail(game.current_player()).iter(),
+                ));
             }
         }
-
-        if is_empty_flag[0] || is_empty_flag[1] {
-            status[chance] = 1;
+    
+        GameResultsResponse {
+            current_player: current_player(&game),
+            num_actions: num_actions(&game),
+            is_empty: is_empty_flag,
+            eqr_base,
+            weights,
+            normalizer,
+            equity,
+            ev,
+            eqr,
+            strategy,
+            action_ev,
+        }
+    }
+    
+    #[derive(Serialize)]
+    pub struct GameChanceReportsResponse {
+        status: Vec<i32>,
+        combos: [Vec<f64>; 2],
+        equity: [Vec<f64>; 2],
+        ev: [Vec<f64>; 2],
+        eqr: [Vec<f64>; 2],
+        strategy: Vec<f64>,
+    }
+    
+    #[tauri::command]
+    pub fn game_get_chance_reports(
+        game_state: tauri::State<Mutex<PostFlopGame>>,
+        append: Vec<isize>,
+        num_actions: usize,
+    ) -> GameChanceReportsResponse {
+        let mut game = game_state.lock().unwrap();
+        let history = game.history().to_vec();
+    
+        let mut status = vec![0; 52]; // 0: not possible, 1: empty, 2: not empty
+        let mut combos = [vec![0.0; 52], vec![0.0; 52]];
+        let mut equity = [vec![0.0; 52], vec![0.0; 52]];
+        let mut ev = [vec![0.0; 52], vec![0.0; 52]];
+        let mut eqr = [vec![0.0; 52], vec![0.0; 52]];
+        let mut strategy = vec![0.0; num_actions * 52];
+    
+        let possible_cards = game.possible_cards();
+        for chance in 0..52 {
+            if possible_cards & (1 << chance) == 0 {
+                continue;
+            }
+    
+            game.play(chance);
+            for &action in &append[1..] {
+                game.play(action_usize(action));
+            }
+    
+            let trunc = |&w: &f32| if w < 0.0005 { 0.0 } else { w };
+            let weights = [
+                game.weights(0).iter().map(trunc).collect::<Vec<_>>(),
+                game.weights(1).iter().map(trunc).collect::<Vec<_>>(),
+            ];
+    
+            combos[0][chance] = round(weights[0].iter().fold(0.0, |acc, &w| acc + w as f64));
+            combos[1][chance] = round(weights[1].iter().fold(0.0, |acc, &w| acc + w as f64));
+    
+            let is_empty = |player: usize| weights[player].iter().all(|&w| w == 0.0);
+            let is_empty_flag = [is_empty(0), is_empty(1)];
+    
+            game.cache_normalized_weights();
+            let normalizer = [game.normalized_weights(0), game.normalized_weights(1)];
+    
+            if !game.is_terminal_node() {
+                let current_player = game.current_player();
+                if !is_empty_flag[current_player] {
+                    let strategy_tmp = game.strategy();
+                    let num_hands = game.private_cards(current_player).len();
+                    let ws = if is_empty_flag[current_player ^ 1] {
+                        &weights[current_player]
+                    } else {
+                        normalizer[current_player]
+                    };
+                    for action in 0..num_actions {
+                        let slice = &strategy_tmp[action * num_hands..(action + 1) * num_hands];
+                        let strategy_summary = weighted_average(slice, ws);
+                        strategy[action * 52 + chance] = round(strategy_summary);
+                    }
+                }
+            }
+    
+            if is_empty_flag[0] || is_empty_flag[1] {
+                status[chance] = 1;
+                game.apply_history(&history);
+                continue;
+            }
+    
+            status[chance] = 2;
+    
+            let total_bet_amount = game.total_bet_amount();
+            let pot_base = game.tree_config().starting_pot + total_bet_amount.iter().min().unwrap();
+    
+            for player in 0..2 {
+                let pot = (pot_base + total_bet_amount[player]) as f32;
+                let equity_tmp = weighted_average(&game.equity(player), normalizer[player]);
+                let ev_tmp = weighted_average(&game.expected_values(player), normalizer[player]);
+                equity[player][chance] = round(equity_tmp);
+                ev[player][chance] = round(ev_tmp);
+                eqr[player][chance] = round(ev_tmp / (pot as f64 * equity_tmp));
+            }
+    
             game.apply_history(&history);
-            continue;
         }
-
-        status[chance] = 2;
-
-        let total_bet_amount = game.total_bet_amount();
-        let pot_base = game.tree_config().starting_pot + total_bet_amount.iter().min().unwrap();
-
-        for player in 0..2 {
-            let pot = (pot_base + total_bet_amount[player]) as f32;
-            let equity_tmp = weighted_average(&game.equity(player), normalizer[player]);
-            let ev_tmp = weighted_average(&game.expected_values(player), normalizer[player]);
-            equity[player][chance] = round(equity_tmp);
-            ev[player][chance] = round(ev_tmp);
-            eqr[player][chance] = round(ev_tmp / (pot as f64 * equity_tmp));
+    
+        GameChanceReportsResponse {
+            status,
+            combos,
+            equity,
+            ev,
+            eqr,
+            strategy,
         }
-
-        game.apply_history(&history);
-    }
-
-    GameChanceReportsResponse {
-        status,
-        combos,
-        equity,
-        ev,
-        eqr,
-        strategy,
     }
 }
